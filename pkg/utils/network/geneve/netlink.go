@@ -15,6 +15,7 @@
 package geneve
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -54,11 +55,14 @@ func EnsureGeneveInterfaceAbsence(interfaceName string) error {
 
 // ForgeGeneveInterface creates a geneve interface with the given name, remote IP and ID.
 func ForgeGeneveInterface(name string, remote net.IP, id uint32, mtu int, port uint16) *netlink.Geneve {
+	hash := sha256.Sum256([]byte(name))
+	mac := net.HardwareAddr{0x02, hash[0], hash[1], hash[2], hash[3], hash[4]}
 	return &netlink.Geneve{
 		LinkAttrs: netlink.LinkAttrs{
-			Name:   name,
-			TxQLen: 1000,
-			MTU:    mtu,
+			Name:         name,
+			TxQLen:       1000,
+			MTU:          mtu,
+			HardwareAddr: mac,
 		},
 		ID:     id,
 		Remote: remote,
@@ -76,6 +80,9 @@ func CreateGeneveInterface(name string, local, remote net.IP, id uint32, disable
 		if err := netlink.LinkAdd(geneveLink); err != nil {
 			return fmt.Errorf("cannot create geneve link: %w", err)
 		}
+		if err := netlink.LinkSetHardwareAddr(geneveLink, geneveLink.HardwareAddr); err != nil {
+			klog.Warningf("cannot set hardware address for geneve link %s: %v", name, err)
+		}
 	} else {
 		geneveLink = link.(*netlink.Geneve)
 		if !geneveLink.Remote.Equal(remote) || geneveLink.MTU != mtu || geneveLink.Dport != port || geneveLink.ID != id {
@@ -88,6 +95,15 @@ func CreateGeneveInterface(name string, local, remote net.IP, id uint32, disable
 			geneveLink = ForgeGeneveInterface(name, remote, id, mtu, port)
 			if err := netlink.LinkAdd(geneveLink); err != nil {
 				return fmt.Errorf("cannot modify geneve link: %w", err)
+			}
+			if err := netlink.LinkSetHardwareAddr(geneveLink, geneveLink.HardwareAddr); err != nil {
+				klog.Warningf("cannot set hardware address for geneve link %s: %v", name, err)
+			}
+		} else {
+			// Enforce the MAC address even if the link already exists.
+			expectedMac := ForgeGeneveInterface(name, remote, id, mtu, port).HardwareAddr
+			if err := netlink.LinkSetHardwareAddr(geneveLink, expectedMac); err != nil {
+				klog.Warningf("cannot set hardware address for existing geneve link %s: %v", name, err)
 			}
 		}
 	}
